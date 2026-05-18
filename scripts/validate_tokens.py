@@ -11,7 +11,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import json5
 from defusedxml import ElementTree
@@ -20,9 +20,15 @@ from utils.web3 import (
     CHAIN_NAMES,
     CHAIN_RPC_URLS,
     DEFAULT_RPC_URL,
+    fetch_ccip_token_config_with_retry,
+    fetch_cctp_burn_limits_per_message_with_retry,
+    fetch_hyperlane_wrapped_token_with_retry,
+    fetch_oft_bridge_token_with_retry,
     fetch_token_decimals_with_retry,
     fetch_token_name_with_retry,
     fetch_token_symbol_with_retry,
+    fetch_wormhole_chain_id_with_retry,
+    fetch_wormhole_ntt_token_with_retry,
     get_web3_connection,
     get_web3_connection_for_chain,
 )
@@ -57,7 +63,16 @@ VALID_BRIDGE_PROTOCOLS = {
     "Wormhole",
     "Wormhole NTT",
 }
+EXPECTED_BRIDGE_ADDRESSES = {
+    "Chainlink CCIP": "0x33566fE5976AAa420F3d5C64996641Fc3858CaDB",
+    "Circle CCTP": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+    "Wormhole": "0x0B2719cdA2F10595369e6673ceA3Ee2EDFa13BA7",
+}
+CCIP_TOKEN_ADMIN_REGISTRY_ADDRESS = "0x11ACd984DD680363117B310f6ebdf78fD6c0195f"
+CCTP_TOKEN_MINTER_V2_ADDRESS = "0xfd78EE919681417d192449715b2594ab58f5D002"
+WORMHOLE_MULTI_TOKEN_NTT_MANAGER_ADDRESS = "0x36878C6FCa7e0E8a88F90dc410CfBBcA5B695C95"
 EXPECTED_CHAIN_ID = 143
+WORMHOLE_MONAD_CHAIN_ID = 48
 MIN_DECIMALS = 0
 MAX_DECIMALS = 36
 MIN_LOGO_SIZE = 200
@@ -148,6 +163,14 @@ def validate_bridge_info(bridge_info: dict[str, Any]) -> list[str]:
             )
         elif not is_valid_address(bridge_address):
             errors.append(f"Invalid bridgeInfo.bridgeAddress address: {bridge_address}")
+        elif "protocol" in bridge_info and bridge_info["protocol"] in EXPECTED_BRIDGE_ADDRESSES:
+            protocol = bridge_info["protocol"]
+            expected_address = EXPECTED_BRIDGE_ADDRESSES[protocol]
+            if bridge_address != expected_address:
+                errors.append(
+                    f"Invalid bridgeInfo.bridgeAddress for {protocol}: "
+                    f"expected {expected_address}, got {bridge_address}"
+                )
 
     return errors
 
@@ -321,14 +344,14 @@ def validate_cross_chain_metadata(
     return errors, warnings
 
 
-def get_svg_dimensions(svg_path: Path) -> tuple[Optional[int], Optional[int]]:
+def get_svg_dimensions(svg_path: Path) -> tuple[int | None, int | None]:
     """Extract width and height from an SVG file.
 
     Args:
         svg_path: Path to the SVG file.
 
     Returns:
-        tuple[Optional[int], Optional[int]]: (width, height) in pixels, or (None, None) if not
+        tuple[int | None, int | None]: (width, height) in pixels, or (None, None) if not
         found.
     """
     try:
@@ -516,6 +539,10 @@ def validate_token_data(
     onchain_errors = validate_onchain_metadata(data, web3)
     errors.extend(onchain_errors)
 
+    # Validate bridge on-chain data
+    bridge_errors = validate_bridge_onchain(data, web3)
+    errors.extend(bridge_errors)
+
     # Cross-chain metadata validation (optional)
     if validate_cross_chain and "extensions" in data:
         extensions = data.get("extensions", {})
@@ -525,6 +552,90 @@ def validate_token_data(
             warnings.extend(cc_warnings)
 
     return errors, warnings
+
+
+def validate_bridge_onchain(data: dict[str, Any], web3: Web3) -> list[str]:
+    """Validate bridge protocol specific on-chain requirements.
+
+    Args:
+        data: The token data dictionary.
+        web3: Web3 instance connected to the chain.
+
+    Returns:
+        list[str]: List of error messages. Empty list if validation passes.
+    """
+    errors = []
+    extensions = data.get("extensions", {})
+    bridge_info = extensions.get("bridgeInfo", {})
+
+    if not bridge_info:
+        return errors
+
+    protocol = bridge_info.get("protocol")
+    bridge_address = bridge_info.get("bridgeAddress")
+    token_address = data.get("address")
+
+    if not protocol or not bridge_address or not token_address:
+        return errors
+
+    try:
+        match protocol:
+            case "LayerZero OFT":
+                bridge_token = fetch_oft_bridge_token_with_retry(web3, bridge_address)
+                if bridge_token.lower() != token_address.lower():
+                    errors.append(
+                        f"OFT bridge token mismatch: expected '{token_address}', "
+                        f"got '{bridge_token}'"
+                    )
+            case "Wormhole":
+                chain_id = fetch_wormhole_chain_id_with_retry(web3, bridge_address)
+                if chain_id != WORMHOLE_MONAD_CHAIN_ID:
+                    errors.append(
+                        f"Wormhole NTT chainId mismatch: expected {WORMHOLE_MONAD_CHAIN_ID}, "
+                        f"got {chain_id}"
+                    )
+            case "Wormhole NTT" if bridge_address != WORMHOLE_MULTI_TOKEN_NTT_MANAGER_ADDRESS:
+                bridge_token = fetch_wormhole_ntt_token_with_retry(web3, bridge_address)
+                if bridge_token.lower() != token_address.lower():
+                    errors.append(
+                        f"Wormhole NTT token address mismatch: expected '{token_address}', "
+                        f"got '{bridge_token}'"
+                    )
+            case "Hyperlane Warp Route":
+                wrapped_token = fetch_hyperlane_wrapped_token_with_retry(web3, bridge_address)
+                if wrapped_token.lower() != token_address.lower():
+                    errors.append(
+                        f"Hyperlane wrapped token mismatch: expected '{token_address}', "
+                        f"got '{wrapped_token}'"
+                    )
+            case "Circle CCTP":
+                burn_limit = fetch_cctp_burn_limits_per_message_with_retry(
+                    web3,
+                    CCTP_TOKEN_MINTER_V2_ADDRESS,
+                    token_address,
+                )
+                if burn_limit <= 0:
+                    errors.append(
+                        f"Circle CCTP token is not supported by the CCTP minter: "
+                        f"burnLimitsPerMessage returned {burn_limit}"
+                    )
+            case "Chainlink CCIP":
+                administrator, pending_administrator, token_pool = (
+                    fetch_ccip_token_config_with_retry(web3, token_address)
+                )
+                if (
+                    administrator == ZERO_ADDRESS
+                    and pending_administrator == ZERO_ADDRESS
+                    and token_pool == ZERO_ADDRESS
+                ):
+                    errors.append(
+                        "Chainlink CCIP token is not supported by the admin registry: "
+                        "getTokenConfig returned all zero addresses"
+                    )
+    except Exception as e:
+        errors.append(f"Failed to validate {protocol} bridge on-chain: {e}")
+
+    return errors
 
 
 def validate_onchain_metadata(data: dict[str, Any], web3: Web3) -> list[str]:

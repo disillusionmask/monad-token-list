@@ -6,7 +6,6 @@ ERC20 token metadata with retry logic.
 
 import os
 import time
-from typing import Optional
 
 from web3 import Web3
 from web3.exceptions import Web3Exception
@@ -64,6 +63,74 @@ ERC20_ABI = [
         "type": "function",
     },
 ]
+OFT_BRIDGE_ABI = [
+    {
+        "inputs": [],
+        "name": "token",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+WORMHOLE_ABI = [
+    {
+        "inputs": [],
+        "name": "chainId",
+        "outputs": [{"name": "", "type": "uint16"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+WORMHOLE_NTT_MANAGER_ABI = [
+    {
+        "inputs": [],
+        "name": "token",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+HYPERLANE_WARP_ROUTE_ABI = [
+    {
+        "inputs": [],
+        "name": "wrappedToken",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+CCTP_TOKEN_MINTER_V2_ADDRESS = "0xfd78EE919681417d192449715b2594ab58f5D002"
+CCTP_TOKEN_MINTER_V2_ABI = [
+    {
+        "inputs": [{"name": "token", "type": "address"}],
+        "name": "burnLimitsPerMessage",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+CCIP_TOKEN_ADMIN_REGISTRY_ADDRESS = "0x11ACd984DD680363117B310f6ebdf78fD6c0195f"
+CCIP_TOKEN_ADMIN_REGISTRY_ABI = [
+    {
+        "inputs": [{"name": "token", "type": "address"}],
+        "name": "getTokenConfig",
+        "outputs": [
+            {
+                "components": [
+                    {"name": "administrator", "type": "address"},
+                    {"name": "pendingAdministrator", "type": "address"},
+                    {"name": "tokenPool", "type": "address"},
+                ],
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
 
 # Retry configuration
 DEFAULT_MAX_RETRIES = 3
@@ -110,7 +177,7 @@ def _retry_with_backoff(
     ) from last_exception
 
 
-def get_web3_connection(rpc_url: Optional[str] = None) -> Web3:
+def get_web3_connection(rpc_url: str | None = None) -> Web3:
     """Get a Web3 connection to the blockchain.
 
     Args:
@@ -131,15 +198,15 @@ def get_web3_connection(rpc_url: Optional[str] = None) -> Web3:
     return web3
 
 
-def get_web3_connection_for_chain(chain_id: str) -> Optional[Web3]:
+def get_web3_connection_for_chain(chain_id: str) -> Web3 | None:
     """Get a Web3 connection for a specific chain.
 
     Args:
         chain_id: The chain ID as a string (e.g., "1" for Ethereum).
 
     Returns:
-        Web3: Connected Web3 instance, or None if chain is not supported
-              or connection fails.
+        Web3 | None: Connected Web3 instance, or None if chain is not supported
+        or connection fails.
     """
     if chain_id not in CHAIN_RPC_URLS:
         return None
@@ -304,4 +371,201 @@ def fetch_token_decimals_with_retry(
         retry_delay,
         retry_backoff,
         "fetch decimals",
+    )
+
+
+def fetch_wormhole_chain_id_with_retry(
+    web3: Web3,
+    address: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+) -> int:
+    """Fetch chainId from a Wormhole bridge contract with retry logic.
+
+    Args:
+        web3: Web3 instance connected to the chain.
+        address: Contract address (should be checksummed).
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        retry_backoff: Multiplier for exponential backoff.
+
+    Returns:
+        int: chainId (uint16)
+
+    Raises:
+        Exception: If fetching the chainId fails after all retries.
+    """
+    contract = web3.eth.contract(address=address, abi=WORMHOLE_ABI)
+    return _retry_with_backoff(
+        lambda: contract.functions.chainId().call(),
+        max_retries,
+        retry_delay,
+        retry_backoff,
+        "fetch chainId",
+    )
+
+
+def fetch_wormhole_ntt_token_with_retry(
+    web3: Web3,
+    address: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+) -> str:
+    """Fetch token address from a Wormhole NTT bridge contract with retry logic.
+
+    Args:
+        web3: Web3 instance connected to the chain.
+        address: Contract address (should be checksummed).
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        retry_backoff: Multiplier for exponential backoff.
+
+    Returns:
+        str: token address
+
+    Raises:
+        Exception: If fetching the token fails after all retries.
+    """
+    contract = web3.eth.contract(address=address, abi=WORMHOLE_NTT_MANAGER_ABI)
+    return _retry_with_backoff(
+        lambda: contract.functions.token().call(),
+        max_retries,
+        retry_delay,
+        retry_backoff,
+        "fetch token",
+    )
+
+
+def fetch_oft_bridge_token_with_retry(
+    web3: Web3,
+    address: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+) -> str:
+    """Fetch token address from an OFT bridge contract with retry logic.
+
+    Args:
+        web3: Web3 instance connected to the chain.
+        address: OFT bridge contract address (should be checksummed).
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        retry_backoff: Multiplier for exponential backoff.
+
+    Returns:
+        str: Token address
+
+    Raises:
+        Exception: If fetching the token fails after all retries.
+    """
+    contract = web3.eth.contract(address=address, abi=OFT_BRIDGE_ABI)
+    return _retry_with_backoff(
+        lambda: contract.functions.token().call(),
+        max_retries,
+        retry_delay,
+        retry_backoff,
+        "fetch bridge token",
+    )
+
+
+def fetch_hyperlane_wrapped_token_with_retry(
+    web3: Web3,
+    address: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+) -> str:
+    """Fetch wrapped token address from a Hyperlane bridge contract with retry logic.
+
+    Args:
+        web3: Web3 instance connected to the chain.
+        address: Hyperlane bridge contract address (should be checksummed).
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        retry_backoff: Multiplier for exponential backoff.
+
+    Returns:
+        str: Wrapped token address
+
+    Raises:
+        Exception: If fetching the wrapped token fails after all retries.
+    """
+    contract = web3.eth.contract(address=address, abi=HYPERLANE_WARP_ROUTE_ABI)
+    return _retry_with_backoff(
+        lambda: contract.functions.wrappedToken().call(),
+        max_retries,
+        retry_delay,
+        retry_backoff,
+        "fetch wrapped token",
+    )
+
+
+def fetch_cctp_burn_limits_per_message_with_retry(
+    web3: Web3,
+    contract_address: str,
+    token_address: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+) -> int:
+    """Fetch burnLimitsPerMessage for a token from the CCTP minter contract.
+
+    Args:
+        web3: Web3 instance connected to the chain.
+        contract_address: CCTP minter contract address.
+        token_address: Token contract address to query.
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        retry_backoff: Multiplier for exponential backoff.
+
+    Returns:
+        int: burn limit per message for the token.
+
+    Raises:
+        Exception: If fetching the burn limit fails after all retries.
+    """
+    contract = web3.eth.contract(address=contract_address, abi=CCTP_TOKEN_MINTER_V2_ABI)
+    return _retry_with_backoff(
+        lambda: contract.functions.burnLimitsPerMessage(token_address).call(),
+        max_retries,
+        retry_delay,
+        retry_backoff,
+        "fetch CCTP burn limits per message",
+    )
+
+
+def fetch_ccip_token_config_with_retry(
+    web3: Web3,
+    token_address: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+    retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+) -> tuple[str, str, str]:
+    """Fetch CCIP token config from the admin registry with retry logic.
+
+    Args:
+        web3: Web3 instance connected to the chain.
+        token_address: Token contract address to query.
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        retry_backoff: Multiplier for exponential backoff.
+
+    Returns:
+        tuple[str, str, str]: (administrator, pendingAdministrator, tokenPool)
+
+    Raises:
+        Exception: If fetching the token config fails after all retries.
+    """
+    contract = web3.eth.contract(
+        address=CCIP_TOKEN_ADMIN_REGISTRY_ADDRESS,
+        abi=CCIP_TOKEN_ADMIN_REGISTRY_ABI,
+    )
+    return _retry_with_backoff(
+        lambda: contract.functions.getTokenConfig(token_address).call(),
+        max_retries,
+        retry_delay,
+        retry_backoff,
+        "fetch CCIP token config",
     )
